@@ -1,57 +1,125 @@
-name: Deploy to AWS
+name: Deploy to AWS Elastic Beanstalk using ECR
 
 on:
   push:
     branches:
-      - main  # or your default branch
+      - main
 
 env:
-  AWS_REGION: eu-north-1                # Your AWS region
-  S3_BUCKET: blogify0bucket             # Your S3 bucket name
-  EB_APPLICATION_NAME: blogify-app      # Your Elastic Beanstalk application name
-  EB_ENVIRONMENT_NAME: Blogify-app-env  # Your Elastic Beanstalk environment name # Change this to your Elastic Beanstalk environment name
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  ECR_REPO_FRONTEND: ${{ secrets.ECR_REPO_FRONTEND }}
+  ECR_REPO_BACKEND: ${{ secrets.ECR_REPO_BACKEND }}
+  EB_APP_NAME: ${{ secrets.EB_APP_NAME }}
+  EB_ENV_NAME: ${{ secrets.EB_ENV_NAME }}
+  S3_BUCKET_NAME: ${{ secrets.S3_BUCKET_NAME }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - uses: actions/checkout@v3
+    - name: Checkout code
+      uses: actions/checkout@v3
 
-    - name: Setup Node.js
-      uses: actions/setup-node@v3
-      with:
-        node-version: '18'
-        cache: 'npm'
-
-    - name: Install Dependencies
-      run: npm ci
-
-    - name: Build
-      run: npm run build
-
-    - name: Configure AWS Credentials
-      uses: aws-actions/configure-aws-credentials@v1
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v3
       with:
         aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: ${{ env.AWS_REGION }}
 
-    - name: Deploy to S3
-      run: |
-        aws s3 sync build/ s3://${{ env.S3_BUCKET }} --delete
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
 
-    - name: Generate deployment package
+    - name: Build and push frontend Docker image
       run: |
-        zip -r deploy.zip . -x "*.git*" "node_modules/*" "build/*"
+        docker build -t $ECR_REPO_FRONTEND:latest -f Dockerfile.dev .
+        docker tag $ECR_REPO_FRONTEND:latest ${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_FRONTEND:latest
+        docker push ${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_FRONTEND:latest
 
-    - name: Deploy to Elastic Beanstalk
-      uses: einaregilsson/beanstalk-deploy@v21
-      with:
-        aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        application_name: ${{ env.EB_APPLICATION_NAME }}
-        environment_name: ${{ env.EB_ENVIRONMENT_NAME }}
-        version_label: ${{ github.sha }}
-        region: ${{ env.AWS_REGION }}
-        deployment_package: deploy.zip 
+    - name: Build and push backend Docker image
+      run: |
+        docker build -t $ECR_REPO_BACKEND:latest -f Dockerfile.backend .
+        docker tag $ECR_REPO_BACKEND:latest ${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_BACKEND:latest
+        docker push ${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_BACKEND:latest
+
+    - name: Create Dockerrun.aws.json
+      run: |
+        cat > Dockerrun.aws.json <<EOF
+        {
+          "AWSEBDockerrunVersion": 2,
+          "containerDefinitions": [
+            {
+              "name": "frontend",
+              "image": "${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_FRONTEND:latest",
+              "essential": true,
+              "memory": 512,
+              "portMappings": [
+                {
+                  "hostPort": 80,
+                  "containerPort": 3000
+                }
+              ],
+              "environment": [
+                {
+                  "name": "REACT_APP_BACKEND_URL",
+                  "value": "http://backend:5000"
+                }
+              ],
+              "links": ["backend"]
+            },
+            {
+              "name": "backend",
+              "image": "${{ steps.login-ecr.outputs.registry }}/$ECR_REPO_BACKEND:latest",
+              "essential": true,
+              "memory": 512,
+              "portMappings": [
+                {
+                  "hostPort": 5000,
+                  "containerPort": 5000
+                }
+              ],
+              "environment": [
+                {
+                  "name": "REDIS_URL",
+                  "value": "redis://redis:6379"
+                }
+              ],
+              "links": ["redis"]
+            },
+            {
+              "name": "redis",
+              "image": "redis:alpine",
+              "essential": false,
+              "memory": 256,
+              "portMappings": [
+                {
+                  "hostPort": 6379,
+                  "containerPort": 6379
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+
+    - name: Zip Dockerrun.aws.json
+      run: zip deploy.zip Dockerrun.aws.json
+
+    - name: Upload deployment package to S3
+      run: |
+        aws s3 cp deploy.zip s3://$S3_BUCKET_NAME/deploy.zip
+
+    - name: Create new Elastic Beanstalk application version
+      run: |
+        aws elasticbeanstalk create-application-version \
+          --application-name $EB_APP_NAME \
+          --version-label "v-${{ github.run_number }}" \
+          --source-bundle S3Bucket="$S3_BUCKET_NAME",S3Key="deploy.zip"
+
+    - name: Update Elastic Beanstalk environment
+      run: |
+        aws elasticbeanstalk update-environment \
+          --environment-name $EB_ENV_NAME \
+          --version-label "v-${{ github.run_number }}"
