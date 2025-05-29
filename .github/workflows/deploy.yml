@@ -34,4 +34,4 @@ jobs:
           version_label: v-${{ github.run_number }}
           region: eu-north-1
           deployment_package: deploy-package.zip
-
+          
