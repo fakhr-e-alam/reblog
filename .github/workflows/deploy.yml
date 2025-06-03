@@ -1,37 +1,41 @@
-name: Deploy to AWS Elastic Beanstalk
+version: 0.2
 
-on:
-  push:
-    branches:
-      - master
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $BACKEND_ECR_URI
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $FRONTEND_ECR_URI
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  build:
+    commands:
+      - echo Build backend image...
+      - docker build -t $BACKEND_ECR_URI:$IMAGE_TAG backend/
+      - echo Build frontend image...
+      - docker build -t $FRONTEND_ECR_URI:$IMAGE_TAG frontend/
 
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
+  post_build:
+    commands:
+      - echo Push backend image...
+      - docker push $BACKEND_ECR_URI:$IMAGE_TAG
+      - echo Push frontend image...
+      - docker push $FRONTEND_ECR_URI:$IMAGE_TAG
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v3
-        with:
-          node-version: '18'
+      - echo "Creating deployment manifest..."
+      - |
+        cat <<EOF > imagedefinitions.json
+        [
+          {
+            "name": "backend-container",
+            "imageUri": "$BACKEND_ECR_URI:$IMAGE_TAG"
+          },
+          {
+            "name": "frontend-container",
+            "imageUri": "$FRONTEND_ECR_URI:$IMAGE_TAG"
+          }
+        ]
+        EOF
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Zip the application
-        run: zip -r deploy-package.zip . -x "*.git*" -x "node_modules/*"
-
-      - name: Deploy to Elastic Beanstalk
-        uses: einaregilsson/beanstalk-deploy@v20
-        with:
-          aws_access_key: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          application_name: reblog
-          environment_name: Reblog-env
-          version_label: v-${{ github.run_number }}
-          region: eu-north-1
-          deployment_package: deploy-package.zip
-          
+artifacts:
+  files:
+    - imagedefinitions.json
