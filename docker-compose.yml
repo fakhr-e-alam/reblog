@@ -2,33 +2,25 @@ version: '3.8'
 
 services:
   frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.dev
+    image: fakhrealam7/reblog-frontend
+    # Map host port 80 → container’s port 3000 so ALB can route HTTP traffic
     ports:
-      - "3000:3000"
-    volumes:
-      - ./src:/app/src
-      - /app/node_modules
+      - "80:3000"
     environment:
-      - REACT_APP_BACKEND_URL=http://localhost:5000
+      - REACT_APP_BACKEND_URL=http://backend:5000
     depends_on:
       - backend
     networks:
       - blog-network
 
   backend:
-    build:
-      context: .
-      dockerfile: Dockerfile.backend
-    ports:
-      - "5000:5000"
-    volumes:
-      - ./src/backend:/app/src/backend
-      - /app/node_modules
+    image: fakhrealam7/reblog-backend
+    # Don’t publish a host port—use “expose” so only other containers can reach it
+    expose:
+      - "5000"
     environment:
       - REDIS_URL=redis://redis:6379
-      - NODE_ENV=development
+      - NODE_ENV=production
     depends_on:
       - redis
     networks:
@@ -36,13 +28,14 @@ services:
 
   redis:
     image: redis:alpine
-    ports:
-      - "6379:6379"
+    # Only expose to the network, no host binding
+    expose:
+      - "6379"
     volumes:
       - redis-data:/data
+    command: redis-server --appendonly yes
     networks:
       - blog-network
-    command: redis-server --appendonly yes
 
 networks:
   blog-network:
